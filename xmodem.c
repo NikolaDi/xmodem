@@ -1,32 +1,21 @@
 #include ".\app_cfg.h"
 
-typedef struct{
-    uint8_t *pchString;
-}xmodem_print_t;
-xmodem_print_t xmodem_print;
+typedef enum {
+    PACKET_CPL = 0,
+    PACKET_CHAR_CPL,
+    PACKET_DATA_CPL,
+    PACKET_CHECK_CPL,
+    PACKET_TIMEOUT,
+    PACKET_NOCHAR,
+    PACKET_ERROR_HEAD,
+    PACKET_ERROR_PNUM,
+    PACKET_ERROR_NPNUM,
+    PACKET_ERROR_CHECK,
+    PACKET_ERROR_CHAR_TIMEOUT,
+    PACKET_ON_GOING,
+}xmodem_packet_t;
 
-// static fsm_rt_t xmodem_print_rn()
-// {
-    // static enum{
-        // XMODEM_PRINT_RN_FSM_START = 0,
-        // XMODEM_PRINT_RN_FSM_RRRRR,
-        // XMODEM_PRINT_RN_FSM_NNNNN,
-    // }s_emState = XMODEM_PRINT_RN_FSM_START;
-    
-    // switch(s_emState) {
-        // case XMODEM_PRINT_RN_FSM_START:
-            // s_emState = XMODEM_PRINT_RN_FSM_RRRRR;
-            // break;
-        // case XMODEM_PRINT_RN_FSM_RRRRR:
-            // if(XMODEM_WRITE_BYTE('\r\n'))
-            // break;
-        // case XMODEM_PRINT_RN_FSM_NNNNN:
-        
-            // break;
-    // }
-// }
-
-#define XMODE_PRINT_STRING_FSM_RESET() do{s_emState = XMODEM_PRINT_STRING_START;}while(0)
+#define XMODEM_PRINT_STRING_FSM_RESET() do{s_emState = XMODEM_PRINT_STRING_START;}while(0)
 static fsm_rt_t xmodem_print_string(uint8_t *pchStr)
 {
     static enum{
@@ -45,7 +34,7 @@ static fsm_rt_t xmodem_print_string(uint8_t *pchStr)
             if('\0' != *s_pchStr) {
                 s_emState = XMODEM_PRINT_STRING_SEND;
             }else {
-                XMODE_PRINT_STRING_FSM_RESET();
+                XMODEM_PRINT_STRING_FSM_RESET();
                 return fsm_rt_cpl;
             }
             break;
@@ -121,6 +110,236 @@ static fsm_rt_t xmodem_run_delay()
     return fsm_rt_on_going;
 }
 
+#define TIME_TOKEN  60000
+#define TIME_CHAR   30000
+#define XMODEM_READ_BYTE_WITH_TIMEOUT_RESET() do{s_emState = XMODEM_READ_BYTE_WITH_TIMEOUT_START;}while(0)
+static xmodem_packet_t xmodem_read_byte_with_timeout(uint8_t *pchByte,uint16_t hwTimeOut)
+{
+    static enum {
+        XMODEM_READ_BYTE_WITH_TIMEOUT_START = 0,
+        XMODEM_READ_BYTE_WITH_TIMEOUT_READ,
+    }s_emState = XMODEM_READ_BYTE_WITH_TIMEOUT_START;
+    static uint16_t s_hwTimeCnt;
+    
+    switch(s_emState) {
+        case XMODEM_READ_BYTE_WITH_TIMEOUT_START:
+            s_hwTimeCnt = 0;
+            s_emState = XMODEM_READ_BYTE_WITH_TIMEOUT_READ;
+            //break;
+        case XMODEM_READ_BYTE_WITH_TIMEOUT_READ:
+            if(XMODEM_READ_BYTE(pchByte)) {
+                XMODEM_READ_BYTE_WITH_TIMEOUT_RESET();
+                return PACKET_CHAR_CPL;
+            }
+            
+            if(++s_hwTimeCnt > hwTimeOut) {
+                XMODEM_READ_BYTE_WITH_TIMEOUT_RESET();
+                return PACKET_ERROR_CHAR_TIMEOUT;
+            }
+            break;
+    }
+    
+    return PACKET_ON_GOING;
+}
+
+#define XMODEM_PACKET_DATA_FSM_RESET() do{s_emState = XMODEM_PACKET_DATA_FSM_START;}while(0)
+static xmodem_packet_t xmodem_packet_data(uint8_t *pchBuff,uint16_t hwDataSize)
+{
+    static enum{
+        XMODEM_PACKET_DATA_FSM_START = 0,
+        XMODEM_PACKET_DATA_FSM_DATA,
+    }s_emState = XMODEM_PACKET_DATA_FSM_START;
+    static uint16_t s_hwBuffCnt;
+	xmodem_packet_t tRet;
+	uint8_t chByte;
+    
+    switch(s_emState) {
+        case XMODEM_PACKET_DATA_FSM_START:
+            s_emState = XMODEM_PACKET_DATA_FSM_START;
+            s_hwBuffCnt = 0;
+            //break;
+        case XMODEM_PACKET_DATA_FSM_DATA:
+            tRet = (xmodem_packet_t)xmodem_read_byte_with_timeout(&chByte,TIME_CHAR);
+            if(PACKET_CHAR_CPL == tRet) {
+                pchBuff[s_hwBuffCnt] = chByte;
+                if(++s_hwBuffCnt >= hwDataSize) {
+                    XMODEM_PACKET_DATA_FSM_RESET();
+                    return PACKET_DATA_CPL;
+                }else {
+                    //s_emState = ;
+                }
+            }else if(PACKET_ERROR_CHAR_TIMEOUT == tRet) {
+                XMODEM_PACKET_DATA_FSM_RESET();
+                return PACKET_ERROR_CHAR_TIMEOUT;
+            }
+            break;
+    }
+    
+    return PACKET_ON_GOING;
+}
+
+#define XMODEM_PACKET_CHECK_FSM_RESET() do{s_emState = XMODEM_PACKET_CHECK_FSM_START;}while(0)
+static xmodem_packet_t xmodem_packet_check(uint8_t *pchBuff,uint8_t chToken)
+{
+    static enum{
+        XMODEM_PACKET_CHECK_FSM_START = 0,
+        XMODEM_PACKET_CHECK_FSM_HIGHBYTE,
+        XMODEM_PACKET_CHECK_FSM_LOWBYTE,
+    }s_emState = XMODEM_PACKET_CHECK_FSM_START;
+	xmodem_packet_t tRet;
+	uint8_t chByte;
+    
+    switch(s_emState) {
+        case XMODEM_PACKET_CHECK_FSM_START:
+            s_emState = XMODEM_PACKET_CHECK_FSM_HIGHBYTE;
+            //break;
+        case XMODEM_PACKET_CHECK_FSM_HIGHBYTE:
+            tRet = (xmodem_packet_t)xmodem_read_byte_with_timeout(&chByte,TIME_CHAR);
+            if(PACKET_CHAR_CPL == tRet) {
+                pchBuff[0] = chByte;
+                if(SUM_MODE == chToken) {
+                    XMODEM_PACKET_CHECK_FSM_RESET();
+                    return PACKET_CHECK_CPL;
+                }else {
+                    s_emState = XMODEM_PACKET_CHECK_FSM_LOWBYTE;
+                }
+            }else if(PACKET_ERROR_CHAR_TIMEOUT == tRet) {
+                XMODEM_PACKET_CHECK_FSM_RESET();
+                return PACKET_ERROR_CHAR_TIMEOUT;
+            }
+            break;
+        case XMODEM_PACKET_CHECK_FSM_LOWBYTE:
+            tRet = (xmodem_packet_t)xmodem_read_byte_with_timeout(&chByte,TIME_CHAR);
+            if(PACKET_CHAR_CPL == tRet) {
+                pchBuff[1] = chByte;
+                XMODEM_PACKET_CHECK_FSM_RESET();
+                return PACKET_CHECK_CPL;
+            }else if(PACKET_ERROR_CHAR_TIMEOUT == tRet) {
+                XMODEM_PACKET_CHECK_FSM_RESET();
+                return PACKET_ERROR_CHAR_TIMEOUT;
+            }
+            break;
+    }
+    
+    return PACKET_ON_GOING;
+}
+
+#define XMODEM_PACKET_FSM_RESET() do{s_emState = XMODEM_PACKET_START;}while(0)
+static xmodem_packet_t xmodem_packet(uint8_t *pchBuff,uint8_t chToken)
+{
+    static enum {
+        XMODEM_PACKET_START = 0,
+        XMODEM_PACKET_HEAD,
+        XMODEM_PACKET_PNUM,
+        XMODEM_PACKET_NPNUM,
+        XMODEM_PACKET_DATA,
+        XMODEM_PACKET_CHECK,
+    }s_emState = XMODEM_PACKET_START;
+    xmodem_packet_t tRet;
+    uint8_t chByte;
+    static uint16_t s_hwDataSize;//xmodem xmodem-1k
+    
+    switch(s_emState) {
+        case XMODEM_PACKET_START:
+            s_emState = XMODEM_PACKET_HEAD;
+            //break;
+        case XMODEM_PACKET_HEAD:
+            tRet = (xmodem_packet_t)xmodem_read_byte_with_timeout(&chByte,TIME_TOKEN);
+            if(PACKET_CHAR_CPL == tRet) {
+                if(EOT == chByte) {
+                    XMODEM_PACKET_FSM_RESET();
+                    return PACKET_CPL;
+                }else if(SOH == chByte) {
+                    s_hwDataSize = 128;
+                } else if(STX == chByte) {
+                    s_hwDataSize = 1024;
+                } else {
+                    pchBuff[0] = chByte;
+                    s_emState = XMODEM_PACKET_PNUM;
+                }
+            }else if(PACKET_ERROR_CHAR_TIMEOUT == tRet) {
+                XMODEM_PACKET_FSM_RESET();
+                return PACKET_NOCHAR;
+            }
+            break;
+        case XMODEM_PACKET_PNUM:
+            tRet = (xmodem_packet_t)xmodem_read_byte_with_timeout(&chByte,TIME_CHAR);
+            if(PACKET_CHAR_CPL == tRet) {
+                pchBuff[1] = chByte;
+                s_emState = XMODEM_PACKET_NPNUM;
+            }else if(PACKET_ERROR_CHAR_TIMEOUT == tRet) {
+                XMODEM_PACKET_FSM_RESET();
+                return PACKET_ERROR_CHAR_TIMEOUT;
+            }
+            break;
+        case XMODEM_PACKET_NPNUM:
+            tRet = (xmodem_packet_t)xmodem_read_byte_with_timeout(&chByte,TIME_CHAR);
+            if(PACKET_CHAR_CPL == tRet) {
+                pchBuff[2] = chByte;
+                s_emState = XMODEM_PACKET_DATA;
+            }else if(PACKET_ERROR_CHAR_TIMEOUT == tRet) {
+                XMODEM_PACKET_FSM_RESET();
+                return PACKET_ERROR_CHAR_TIMEOUT;
+            }
+            break;
+        case XMODEM_PACKET_DATA:
+            tRet = (xmodem_packet_t)xmodem_packet_data(pchBuff[3],s_hwDataSize);
+            if(PACKET_DATA_CPL == tRet) {
+                s_emState = XMODEM_PACKET_CHECK;
+            }else if(PACKET_ERROR_CHAR_TIMEOUT == tRet) {
+                XMODEM_PACKET_FSM_RESET();
+                return PACKET_ERROR_CHAR_TIMEOUT;
+            }
+            break;
+        case XMODEM_PACKET_CHECK:
+            tRet = (xmodem_packet_t)xmodem_packet_check(pchBuff[3+s_hwDataSize],chToken);
+            if(PACKET_CHECK_CPL == tRet) {
+                XMODEM_PACKET_FSM_RESET();
+                return PACKET_CPL;
+            }
+            break;
+    }
+    
+    return PACKET_ON_GOING;
+}
+
+#define XMODEM_FRAME_FSM_RESET() do{s_emState = XMODEM_FRAME_FSM_START;}while(0)
+static xmodem_packet_t xmodem_frame()
+{
+    static enum{
+        XMODEM_FRAME_FSM_START = 0,
+        XMODEM_FRAME_FSM_TOKEN,
+        XMODEM_FRAME_FSM_PACKET,
+        XMODEM_FRAME_FSM_PARSE,
+    }s_emState = XMODEM_FRAME_FSM_START;
+    static uint8_t s_chPacketBuff[50];//1029
+    static uint8_t s_chToken;
+    xmodem_packet_t tRet;
+    
+    switch(s_emState) {
+        case XMODEM_FRAME_FSM_START:
+            s_emState = XMODEM_FRAME_FSM_TOKEN;
+            s_chToken = CRC_MODE;
+            break;
+        case XMODEM_FRAME_FSM_TOKEN:
+            if(XMODEM_WRITE_BYTE(s_chToken)) {
+                s_emState = XMODEM_FRAME_FSM_PACKET;
+            }
+            break;
+        case XMODEM_FRAME_FSM_PACKET:
+            tRet = (xmodem_packet_t)xmodem_packet(s_chPacketBuff,s_chToken);
+            if(PACKET_CPL == tRet) {
+                s_emState = XMODEM_FRAME_FSM_PARSE;
+            }
+            break;
+        case XMODEM_FRAME_FSM_PARSE:
+            return PACKET_CPL;
+            break;
+    }
+    
+    return PACKET_ON_GOING;
+}
+
 #define XMODEM_TASK_FSM_RESET() do{s_emState = XMODEM_TASK_FSM_START;}while(0)
 fsm_rt_t xmodem_task()
 {
@@ -140,7 +359,9 @@ fsm_rt_t xmodem_task()
             }
             break;
         case XMODEM_TASK_FSM_FRAME:
-            
+            if(PACKET_CPL == xmodem_frame()) {
+                XMODEM_TASK_FSM_RESET();
+            }
             break;
     }
 
